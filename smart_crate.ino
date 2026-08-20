@@ -8,13 +8,33 @@
 
     RAW,<millis>,<temp>,<hum>,<gas>,<ax>,<ay>,<az>,<lat>,<lon>
 
-  Also listens for a STORE command from Python (sent when a trigger fires):
+  Serial commands received from Python:
 
     STORE,<millis>,<temp>,<hum>,<gas>,<accel_g>,<fall>,<lat>,<lon>,<risk>,<status>
+      -> Writes triggered record to /log.csv on SD card.
+      -> Updates OLED and LEDs with the risk status.
 
-  On receiving STORE:
-    - Writes the record to /log.csv on the SD card
-    - Updates the OLED display and LEDs based on the risk status
+    CONFIG,<produce_name>
+      -> Sets the active produce label shown on the OLED.
+      -> Sent by Python when the user selects a produce in the dashboard.
+
+  ─────────────────────────────────────────────────────────────
+  PRODUCE THRESHOLDS  (all processing done in Python)
+  ─────────────────────────────────────────────────────────────
+  Produce              Temp safe (C)  Hum safe (%)  Notes
+  ─────────────────────────────────────────────────────────────
+  Tomato               10 – 20        85 – 95       Ethylene sensitive
+  Onion                 0 –  5        65 – 70       Low gas sensitivity
+  Strawberry/Blueberry  0 –  4        90 – 95       Very perishable
+  Gobi / Cabbage        0 –  4        90 – 95
+  Apple                 0 –  4        90 – 95
+  Mango                13 – 15        85 – 90       Chilling injury <10C
+  Banana               13 – 15        85 – 90       Ripens fast >20C
+  ─────────────────────────────────────────────────────────────
+  Risk weights: Temp 40%, Humidity 35%, Gas 25%
+  Trigger thresholds: CAUTION >= 40, ALERT >= 70
+  Shock/fall: g <= 0.35 (freefall) or g >= 2.5 (impact)
+  ─────────────────────────────────────────────────────────────
 
   OLED (SSD1306 128x64, I2C 0x3C):
     Shared I2C bus with MPU6050 (MPU6050 is at 0x68)
@@ -22,7 +42,7 @@
 
   LEDs:
     Green LED -> GPIO 25  (SAFE)
-    Red LED   -> GPIO 26  (CAUTION solid / ALERT blink)
+    Red LED   -> GPIO 26  (CAUTION / ALERT)
 */
 
 #include <Arduino.h>
@@ -67,6 +87,9 @@ HardwareSerial GPSSerial(2);
 bool mpuOK  = false;
 bool sdOK   = false;
 bool oledOK = false;
+
+// Active produce — set via CONFIG command from Python
+String currentProduce = "No produce set";
 
 // Last known state (updated when Python sends back STORE with status)
 String lastStatus = "WAITING";
@@ -189,11 +212,23 @@ void loop() {
     gps.encode(GPSSerial.read());
   }
 
-  // ── Check for STORE command from Python ──
+  // ── Check for commands from Python ──
   if (Serial.available()) {
     String cmd = Serial.readStringUntil('\n');
     cmd.trim();
-    if (cmd.startsWith("STORE,")) {
+
+    // ── CONFIG,<produce> — update active produce label on OLED ──
+    if (cmd.startsWith("CONFIG,")) {
+      currentProduce = cmd.substring(7);
+      currentProduce.trim();
+      // Truncate to 20 chars (OLED width at textSize=1)
+      if (currentProduce.length() > 20) currentProduce = currentProduce.substring(0, 20);
+      oledShow("Produce set:", currentProduce, "Waiting for", "Python reading...");
+      Serial.println("MSG,CONFIG ACK: " + currentProduce);
+    }
+
+    // ── STORE,<payload> — log triggered record to SD card ──
+    else if (cmd.startsWith("STORE,")) {
       String payload = cmd.substring(6); // strip "STORE," prefix
       sdLog(payload);
 
@@ -232,9 +267,9 @@ void loop() {
       }
 
       // Update OLED with trigger info
-      String riskStr = "Risk: " + String(lastRisk) + " " + lastStatus;
-      String fallStr = lastFall ? "SHOCK DETECTED" : "";
-      oledShow("** TRIGGER **", riskStr, fallStr, "Logged to SD");
+      String riskStr = "Risk:" + String(lastRisk) + " " + lastStatus;
+      String fallStr = lastFall ? "SHOCK!" : currentProduce;
+      oledShow("!! TRIGGER !!", riskStr, fallStr, "Saved to SD");
     }
   }
 
@@ -264,15 +299,19 @@ void loop() {
   }
 
   // Update OLED with current raw readings
-  char line1[21], line2[21], line3[21], line4[21];
-  snprintf(line1, sizeof(line1), "T:%.1fC  H:%.1f%%",
+  // Line 1: produce name (truncated)
+  // Line 2: temperature + humidity
+  // Line 3: gas reading
+  // Line 4: last known status from Python
+  char line2[21], line3[21], line4[21];
+  snprintf(line2, sizeof(line2), "T:%.1fC H:%.0f%%",
            isnan(temperature) ? 0.0f : temperature,
            isnan(humidity)    ? 0.0f : humidity);
-  snprintf(line2, sizeof(line2), "Gas: %d", gasValue);
-  snprintf(line3, sizeof(line3), "Ax%.2f Ay%.2f Az%.2f", ax, ay, az);
-  snprintf(line4, sizeof(line4), lastStatus == "WAITING" ? "Waiting..." :
-           ("Sts: " + lastStatus).c_str());
-  oledShow(String(line1), String(line2), String(line3), String(line4));
+  snprintf(line3, sizeof(line3), "Gas:%d  g:%.2f", gasValue,
+           (float)sqrt(ax*ax + ay*ay + az*az) / 9.81f);
+  snprintf(line4, sizeof(line4), "Sts: %s",
+           lastStatus == "WAITING" ? "Waiting..." : lastStatus.c_str());
+  oledShow(currentProduce, String(line2), String(line3), String(line4));
 
   // Emit RAW line to Python
   Serial.print("RAW,");

@@ -249,9 +249,19 @@ if not sim_mode:
     if st.session_state.ser is None:
         try:
             st.session_state.ser = serial.Serial(port, baud, timeout=1)
+            # Notify the ESP32 which produce is active so OLED updates
+            time.sleep(0.5)  # give the port a moment to settle
+            st.session_state.ser.write(f"CONFIG,{produce}\n".encode())
         except Exception as e:
             st.error(f"Cannot open {port}: {e}")
             st.stop()
+    else:
+        # Produce may have changed — resend CONFIG
+        if st.session_state.last_produce != produce:
+            try:
+                st.session_state.ser.write(f"CONFIG,{produce}\n".encode())
+            except Exception:
+                pass
     ser = st.session_state.ser
 else:
     ser = None
