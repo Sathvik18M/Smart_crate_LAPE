@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.env
+
+# Local log files (not source code)
+triggers.csv
+data.csv
+
+# VS Code
+.vscode/
+
+# Streamlit cache
+.streamlit/
